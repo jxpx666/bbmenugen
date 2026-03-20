@@ -1,34 +1,64 @@
 #!/usr/bin/perl
 ###############################################################################
-# bbmenugen - Blackbox Menu Generator (Minimal/Documented Version)
+# bbmenugen - Blackbox Menu Generator (Full, Basic & Custom Advanced)
 ###############################################################################
-# Autor: Adaptado por ChatGPT a partir do fbmenugen de Daniel "Trizen" Șuteu
-# Versão: 0.1 (teste)
-# Data: 28/10/2025
+# Autor: Adaptado por José Paulo Maldonado a partir do fbmenugen de Daniel "Trizen" Șuteu
+# Versão: 0.2
+# Data: 20/03/2026
 # Licença: GPLv3
+#
+## TO-DO:
+# - output colorido
+# - validar desktops
+# - desduplicar
+# - colocar \antes de ( ) ou outros caracteres
+# - tirar o no shown, etc...
+# - hierarquia
+# - full com hierarquia
+# - basic com hierarquia
+# - stats dos desktops
+# - atualização do xdg
+# - método de achar bbdir
+# - registrar dependências e checar
+# - checar arquivos e diretórios antes
+# - colocar "(local)" em homonimos de usr
+# - validate bbmenugen bbmenugenrc menuFile e desktop
+# - status
+# - alinhas os EXEC
 #
 # Descrição:
 #   Este script gera menus para o Blackbox Window Manager a partir de arquivos
-#   .desktop, inspirado no fbmenugen/fluxmenugen. Ele oferece suporte a:
-#     - Modo full: detecta todas as categorias presentes nos .desktop
-#     - Modo custom: utiliza um schema definido manualmente
-#     - Locale: escolhe o Name correto de acordo com LC_ALL/LC_MESSAGES/LANG
-#     - Bloco de itens manuais (USER ADVANCED CUSTOM OPTIONS)
+#   .desktop, com suporte a diferentes modos de geração e personalização.
+#   Os modos disponíveis:
+#     - full: detecta automaticamente todas as categorias presentes nos
+#             arquivos .desktop do sistema e do usuário.
+#     - basic: utiliza um esquema definido manualmente pelo usuário (SCHEMA
+#              interno), ideal para menus simplificados.
+#     - custom: permite definir categorias, diretórios de busca e itens
+#               manuais avançados via arquivo ~/.blackbox/bbmenugen/bbmenugenrc.
 #
-# Diferenças principais para o fbmenugen/fluxmenugen:
-#   - Não possui suporte a ícones ou cache
-#   - Não possui GTK ou dependências externas
-#   - Minimalista, apenas Perl padrão
-#   - Suporte direto a locale
-#   - Mantém seções full/custom e itens manuais
+# Funcionalidades principais:
+#   - Suporte a locale: escolhe o Name correto de acordo com LC_ALL/LC_MESSAGES/LANG
+#   - Itens manuais avançados (para comandos ou scripts que não possuem .desktop)
+#   - Suporte a diretórios custom por categoria no modo custom
+#   - Indentação configurável para o menu gerado (\t ou 4 espaços)
+#   - Confirmação de overwrite ao salvar menu
+#   - Modo print-rc-file-sample: gera um RC avançado de exemplo para personalização
+#
+# Diferenças para o fbmenugen / fluxmenugen:
+#   - Não requer GTK ou dependências externas, apenas Perl padrão
+#   - Sem suporte a ícones ou cache
+#   - Permite combinação de categorias reais do sistema com categorias custom
+#   - Suporta itens manuais e diretórios customizados por categoria
+#   - Menu totalmente indentado e legível (pretty print)
+#   - Estrutura modular: full, basic e custom avançado
 #
 # Estrutura do menu Blackbox:
 #   [submenu] (Category Name)
 #       [exec] (App Name) {Command}
 #   [end]
-#   (Pode haver múltiplos submenus)
+#   (Pode haver múltiplos submenus e níveis de indentação configuráveis)
 ###############################################################################
-
 use strict;
 use warnings;
 use 5.014;
@@ -36,17 +66,21 @@ use File::Spec;
 use File::HomeDir;
 
 ###############################################################################
-# Configurações e paths
+# Configurações e paths atualizadas
 ###############################################################################
 my $home_dir     = File::HomeDir->my_home;
 my $blackbox_dir = "$home_dir/.blackbox";
-my $menu_file    = "$blackbox_dir/bbgenmenu";
-
+my $bbmenugen_dir = "$home_dir/.blackbox/bbmenugen";
+my $menu_file    = "$bbmenugen_dir/bbmenugen";         # arquivo default dentro da nova pasta
+my $rc_file = "$bbmenugen_dir/bbmenugenrc"; # arquivo de configuração custom
 # Flags de execução
+my $INDENT = "\t";  # <- aqui você muda a indentação
 my $create_menu;
 my $pipe;
-my $mode = 'full';    # default: full (ou custom)
+my $mode = 'basic';    # default: full (ou basic)
 
+# Criar pasta base, se não existir
+mkdir $bbmenugen_dir unless -d $bbmenugen_dir;
 ###############################################################################
 # Parse de argumentos
 ###############################################################################
@@ -54,7 +88,7 @@ my $mode = 'full';    # default: full (ou custom)
 #   -g : gerar menu
 #   -p : enviar para STDOUT
 #   -o <file> : especifica arquivo de saída
-#   --mode full|custom : define o modo de geração
+#   --mode full|basic : define o modo de geração
 #   -h : ajuda
 while (my $arg = shift @ARGV) {
     if ($arg eq '-g') { $create_menu = 1; }
@@ -62,40 +96,22 @@ while (my $arg = shift @ARGV) {
     elsif ($arg eq '-o') { $menu_file = shift @ARGV or die "-o requires an argument\n"; }
     elsif ($arg eq '--mode') {
         $mode = shift @ARGV;
-        die "--mode requires full|custom\n" unless $mode eq 'full' || $mode eq 'custom';
+        die "--mode requires full|basic|custom\n" 
+            unless $mode eq 'full' || $mode eq 'basic' || $mode eq 'custom';
+    }
+    elsif ($arg eq '--print-rc-file-sample') {
+        print_bbmenugenrc_sample();
+        exit;
     }
     elsif ($arg eq '-h') {
-        print <<"USAGE";
-Usage: $0 [options]
-
-Options:
-  -g               Generate a new menu
-  -p               Print menu to STDOUT instead of saving
-  -o <file>        Menu output file (default: ~/.blackbox/bbgenmenu)
-  --mode full|custom  Menu generation mode
-  -h               Print this help
-
-Examples:
-  $0 -g
-    Generate a full menu to default location
-
-  $0 -g --mode custom -o ~/bbgenmenu_test
-    Generate menu with custom categories to specified file
-
-  $0 -g -p
-    Print generated menu to STDOUT
-
-Advanced:
-  - Edit the \$SCHEMA variable for custom categories
-  - Use USER ADVANCED CUSTOM OPTIONS block to add manual items
-USAGE
+        print_help();
         exit;
     }
     else { die "Unknown option $arg\n"; }
 }
 
-mkdir $blackbox_dir unless -d $blackbox_dir;
-
+# Cria pasta base do bbmenugen se não existir
+mkdir $bbmenugen_dir unless -d $bbmenugen_dir;
 ###############################################################################
 # Locale detection
 ###############################################################################
@@ -112,27 +128,125 @@ my @desktop_dirs = (
 );
 
 ###############################################################################
-# Schema custom (modo 'custom')
+# Schema basic (modo 'basic')
 #   - Lista categorias manuais definidas pelo usuário
 #   - Categorias comentadas podem ser ativadas
 ###############################################################################
 my $SCHEMA = [
-    { cat => ['Utility',     'Utilities'] },
-    { cat => ['Development', 'Development'] },
+{ cat => ['Utility',     'Utilities'] },
     { cat => ['Office',      'Office'] },
-    # { cat => ['Graphics',    'Graphics'] },
-    # { cat => ['AudioVideo',  'Audio/Video'] },
+    { cat => ['Network',     'Network'] },
+    { cat => ['AudioVideo',  'Multimedia'] },
+    { cat => ['Graphics',    'Graphics'] },
+    { cat => ['Game',        'Games'] },
+    { cat => ['Education',   'Education'] },
+    { cat => ['Science',     'Science'] },
+    { cat => ['Development', 'Development'] },
+    { cat => ['Settings',    'Settings'] },
+    { cat => ['System',      'System'] },
 ];
+
+my $CUSTOM_SCHEMA;
+
+if ($mode eq 'custom') {
+    if (-f $rc_file) {
+        open my $fh, '<', $rc_file or die "Cannot open $rc_file: $!";
+        local $/; # slurp
+        my $content = <$fh>;
+        close $fh;
+
+        # Avalia como Perl data structure
+        $CUSTOM_SCHEMA = eval $content;
+        die "Error parsing $rc_file: $@" if $@;
+        die "$rc_file must be an array reference\n" unless ref $CUSTOM_SCHEMA eq 'ARRAY';
+    } else {
+        die "[!] Custom mode enabled but $rc_file not found\n";
+    }
+}
 
 ###############################################################################
 # Funções utilitárias
 ###############################################################################
 # Cria linha de item de menu
-sub prepare_item { "[exec] ($_[1]) {$_[0]}\n" }
+# Inicia submenu com indentação
+sub begin_category {
+    my ($name, $level) = @_;
+    $level //= 0;  # default 0
+    my $indent = $INDENT x $level;
+    return "${indent}[submenu] ($name)\n";
+}
 
-# Inicia submenu
-sub begin_category { "[submenu] ($_[0])\n" }
+# Cria linha de item de menu com indentação
+sub prepare_item {
+    my ($exec, $name, $level) = @_;
+    $level //= 0;
+    my $indent = $INDENT x $level;
+    return "${indent}[exec] ($name) {$exec}\n";
+}
 
+# Fecha submenu com indentação
+sub end_category {
+    my ($level) = @_;
+    $level //= 0;
+    my $indent = $INDENT x $level;
+    return "${indent}[end]\n";
+}
+sub print_bbmenugenrc_sample {
+    print <<'RC_SAMPLE';
+# Example bbmenugenrc file (custom advanced)
+# Place at ~/.blackbox/bbmenugen/bbmenugenrc
+[
+    {
+        cat => ['mytools','My Tools'],
+        dirs => ["$ENV{HOME}/.local/myapps"],
+        items => [
+            { Name => "HTop", Exec => "xterm -e htop" },
+            { Name => "Firefox", Exec => "firefox" }
+        ]
+    },
+    {
+        cat => ['office','Office'],
+        dirs => ["/usr/share/applications"],
+        items => []
+    },
+    {
+        cat => ['games','Games'],
+        dirs => ["/usr/share/applications","$ENV{HOME}/.local/games"],
+        items => [
+            { Name => "Custom Game Launcher", Exec => "~/games/launcher.sh" }
+        ]
+    }
+]
+RC_SAMPLE
+}
+
+sub print_help {
+    print <<"USAGE";
+Usage: $0 [options]
+
+Options:
+  -g                      Generate a new menu
+  -p                      Print menu to STDOUT instead of saving
+  -o <file>               Menu output file (default: ~/.blackbox/bbmenugen/bbmenugen)
+  --mode full|basic|custom  Menu generation mode
+  --print-rc-file-sample  Print an example bbmenugenrc to STDOUT
+  -h                      Print this help
+
+Examples:
+  $0 -g
+      Generate a full menu to default location
+
+  $0 -g --mode basic -o ~/bbgenmenu_test
+      Generate menu with basic categories to specified file
+
+  $0 -g --mode custom -o ~/bbgenmenu_test
+      Generate menu based on your bbmenugenrc
+
+Advanced:
+  - Edit the \$SCHEMA variable for basic categories
+  - Use USER ADVANCED basic OPTIONS block to add manual items
+USAGE
+}
 ###############################################################################
 # Leitura de .desktop files
 #   - Suporta locale
@@ -173,26 +287,87 @@ for my $dir (@desktop_dirs) {
 ###############################################################################
 # Construção do menu
 ###############################################################################
+
+
 my $generated_menu = "";
-if ($mode eq 'full') {
-    for my $cat (sort keys %categories) {
-        $generated_menu .= begin_category(ucfirst $cat);
-        $generated_menu .= prepare_item($_->{Exec}, $_->{Name}) for @{ $categories{$cat} };
-        $generated_menu .= "[end]\n";
-    }
-}
-elsif ($mode eq 'custom') {
+
+if ($mode eq 'basic') {
     for my $schema_entry (@$SCHEMA) {
         my $cat = lc($schema_entry->{cat}[0]);
         next unless exists $categories{$cat};
-        $generated_menu .= begin_category($schema_entry->{cat}[1]);
-        $generated_menu .= prepare_item($_->{Exec}, $_->{Name}) for @{ $categories{$cat} };
-        $generated_menu .= "[end]\n";
+        $generated_menu .= begin_category($schema_entry->{cat}[1], 0);
+        for my $item (@{ $categories{$cat} }) {
+            $generated_menu .= prepare_item($item->{Exec}, $item->{Name}, 1);
+        }
+        $generated_menu .= end_category(0);
     }
+}
+elsif ($mode eq 'full') {
+    for my $cat (sort keys %categories) {
+        $generated_menu .= begin_category(ucfirst $cat, 0);
+        for my $item (@{ $categories{$cat} }) {
+            $generated_menu .= prepare_item($item->{Exec}, $item->{Name}, 1);
+        }
+        $generated_menu .= end_category(0);
+    }
+}
+elsif ($mode eq 'custom') {
+for my $schema_entry (@$CUSTOM_SCHEMA) {
+    my $cat_id = lc($schema_entry->{cat}[0]);
+    my $cat_label = $schema_entry->{cat}[1];
+    
+    # cria submenu
+    $generated_menu .= begin_category($cat_label, 0);
+
+    # --- Itens manuais ---
+    if (exists $schema_entry->{items}) {
+        for my $item (@{$schema_entry->{items}}) {
+            $generated_menu .= prepare_item($item->{Exec}, $item->{Name}, 1);
+        }
+    }
+
+    # --- Itens de .desktop ---
+    my @dirs_to_scan = exists $schema_entry->{dirs} ? @{$schema_entry->{dirs}} : @desktop_dirs;
+    for my $dir (@dirs_to_scan) {
+        next unless -d $dir;
+        opendir(my $dh, $dir) or next;
+        for my $file (grep { /\.desktop$/i } readdir($dh)) {
+            my $full_path = "$dir/$file";
+            open my $fh, '<', $full_path or next;
+
+            my ($name, $exec);
+            my %names;
+            while (<$fh>) {
+                chomp;
+                $names{$1} = $2 if /^Name\[(.+?)\]=(.+)/;
+                $name = $1 if /^Name=(.+)/ && !$name;
+                $exec = $1 if /^Exec=(.+)/ && !$exec;
+            }
+            close $fh;
+
+            $name = $names{$locale} if exists $names{$locale};
+            next unless $name && $exec;
+
+            # Ler categorias do .desktop
+            my $cats_line = `grep '^Categories=' "$full_path"` // '';
+            chomp $cats_line;
+            $cats_line =~ s/^Categories=//;
+            for my $c (split /;/, $cats_line) {
+                if (lc($c) eq $cat_id) {
+                    $generated_menu .= prepare_item($exec, $name, 1);
+                }
+            }
+        }
+        closedir($dh);
+    }
+
+    # fecha submenu
+    $generated_menu .= end_category(0);
+}
 }
 
 ###############################################################################
-# USER ADVANCED CUSTOM OPTIONS (comentado)
+# USER ADVANCED basic OPTIONS (comentado)
 #   - Aqui você pode adicionar itens manuais, independentes dos .desktop
 #   - Use prepare_item($exec,$name) ou begin_category()/[end]
 ###############################################################################
@@ -201,17 +376,44 @@ elsif ($mode eq 'custom') {
 # $generated_menu .= prepare_item("firefox", "Firefox");
 # $generated_menu .= "[end]\n";
 
-###############################################################################
-# Output final
-###############################################################################
-if ($create_menu) {
-    my $out_fh = $pipe ? *STDOUT : do { open my $fh,'>',$menu_file or die "Cannot write $menu_file: $!"; $fh; };
-     print $out_fh $generated_menu;
-    print STDERR ":: Menu generated in mode '$mode'\n" unless $pipe;
-} else {
-    print STDERR "[!] Use -g to generate the menu\n";
-}
 
 ###############################################################################
+# Output final com confirmação de overwrite
+###############################################################################
+if ($create_menu) {
+
+    # Segurança: exigir destino explícito
+    if (!$pipe && !defined $menu_file) {
+        die "[!] You must specify -p (STDOUT) or -o <file> when using -g\n";
+    }
+
+    # Confirmação de overwrite
+    if (-f $menu_file && !$pipe) {
+        print "[!] File '$menu_file' already exists. Overwrite? (y/N): ";
+        chomp(my $answer = <STDIN>);
+        unless ($answer =~ /^[Yy]$/) {
+            print "[*] Aborted. Menu not written.\n";
+            exit;
+        }
+    }
+
+    if ($pipe) {
+        print $generated_menu;
+    }
+    else {
+        open my $fh, '>', $menu_file
+          or die "Cannot write $menu_file: $!";
+        print $fh $generated_menu;
+        close $fh;
+
+        print STDERR ":: Menu written to $menu_file (mode '$mode')\n";
+    }
+}
+else {
+    print STDERR "[!] Use -g to generate the menu\n";
+
+}
+###############################################################################
 # Fim do script
-#################################################
+################################################
+
